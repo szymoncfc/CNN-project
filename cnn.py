@@ -28,10 +28,55 @@ filter_5 = np.array([[
                     [2, 0, -2],
                     [1, 0, -1]]])
 
-def Relu(input):
-    return np.maximum(0,input)
 
 
+class Relu():
+    def forward(self, input):
+        return np.maximum(0,input)
+
+    def backward(self, input):
+        return (1 * (input > 0))
+
+
+class Softmax():
+    def forward(self, input):
+        e_x = np.exp(input - np.max(input))
+
+        return e_x / np.sum(e_x, axis=0)
+
+    def backward(self, input, grad_output):
+        e_x = np.exp(input - np.max(input))
+        out = e_x / np.sum(e_x, axis=0)
+
+        return (out*(1-out))*grad_output
+
+class SGD:
+    def __init__(self, learning_rate, clip_range=10) -> None:
+
+        self.learning_rate = learning_rate
+        self.clip_range = clip_range
+
+    def update_weights(self, weights: np.ndarray, weights_grad: np.ndarray) -> np.ndarray:
+
+        clipped_grad = np.clip(weights_grad, -self.clip_range, self.clip_range)
+        updated_weights = weights - self.learning_rate * clipped_grad
+        return updated_weights
+
+
+class CrossEntropyLoss:
+    def __init__(self, stability=1e-10) -> None:
+
+        self.stability = stability
+
+    def forward(self, predictions: np.ndarray, target: np.ndarray) -> float:
+
+        loss = -np.sum(target * np.log(predictions+self.stability))
+        
+        grad = -target/(predictions+self.stability)
+
+
+        return loss, grad 
+    
 
 class Conv_layer():
     """
@@ -54,7 +99,7 @@ class Conv_layer():
         self.filters = np.array([[[1, 0, -1],[2, 0, -2],[1, 0, -1]]])
 
     def forward(self, input):
-
+        self.input = input
         channels, height, width= input.shape
 
 
@@ -80,13 +125,39 @@ class Conv_layer():
                     output[f, h, w] = np.sum(update * self.filters)
 
 
-        #output = self.activation(output)
+        output = self.activation.forward(output)
         return output
     
 
-    def backward(self, grad_out):
-        pass
+    def backward(self, grad_out, lr):
+        
+        channels, height, width= grad_out.shape    
 
+        grad_out = self.activation.backward(grad_out)
+
+        grad_input = np.zeros(self.input.shape)
+        grad_filter = np.zeros(self.filters.shape)
+
+
+        for c in range(channels):
+            
+            for h in range(height):
+                height_start = h * self.stride
+                height_end = height_start + self.filter_size
+
+                for w in range(width):               
+                    width_start = w * self.stride
+                    width_end = width_start + self.filter_size
+
+                    update = self.input[:, height_start:height_end, width_start:width_end]
+                    grad_filter[c] += np.sum(grad_out[c, h, w]*update)
+
+                    grad_input[:, height_start:height_end, width_start:width_end] += grad_out[c, h, w] * self.filters[c]
+
+        self.filters -= lr * grad_filter
+
+        return grad_input
+    
 
 class Pooling_layer():
     def __init__(self, stride, size):
@@ -94,6 +165,7 @@ class Pooling_layer():
         self.stride = stride
 
     def forward(self, input):
+        self.input = input
         channels, height, width= input.shape
 
         # 2x2 output 2 razy mniejszy
@@ -121,7 +193,106 @@ class Pooling_layer():
         return output_pool
     
     def backward(self, grad_out):
-        pass
+        
+        grad_input = np.zeros(self.input.shape)
+        channels, height, width= grad_out.shape
+
+        for c in range(channels):
+                    
+            for h in range(height):
+                height_start = h * self.stride
+                height_end = height_start + self.filter_size
+
+                for w in range(width):               
+                    width_start = w * self.stride
+                    width_end = width_start + self.filter_size
+
+                    update = self.input[c, height_start:height_end, width_start:width_end]
+
+                    x = update == np.max(update)
+                    grad_input[c, height_start:height_end, width_start:width_end] = grad_out * x
+
+        return grad_input
+    
+
+class FullyConnectedLayer:
+    def __init__(self, input_size, output_size, activation, optimizer) -> None:
+
+        self.input_size = input_size
+        self.output_size = output_size
+        self.activation = activation
+        self.optimizer = optimizer
+        
+        self.weights = np.random.randn(input_size, output_size)
+        self.bias = 0
+
+    def forward(self, input):
+        input = input.flatten() 
+        self.input = input
+        #print(input.shape)
+        intermediate = np.dot(input, self.weights) + self.bias
+        #intermediate = (self.weights.T * input) + self.bias
+        self.intermediate = intermediate
+        output = self.activation.forward(self,intermediate)
+        return output
+    
+    def backward(self, grad_output):
+
+        grad = self.activation.backward(self, self.intermediate, grad_output)
+        input_grad = np.dot(grad, self.weights.T)
+        weight_grad = np.dot(self.input.T, grad)
+        bias_grad = np.sum(grad)
+
+        self.weights = self.optimizer.update_weights(self.weights, weight_grad)
+        self.bias = self.optimizer.update_bias(self.bias, bias_grad)
+
+
+        return input_grad
+
+
+
+class Full_Net:
+    def __init__(
+        self, input_size, output_size, optimizer, 
+        hidden_layers=[128], 
+        output_activation=Softmax, 
+        conv_activation=Relu
+    ) -> None:
+
+        self.input_size = input_size
+        self.output_size = output_size
+        self.optimizer = optimizer
+
+        self.conv_activation = conv_activation
+        self.output_activation = output_activation
+
+        self.loss_object = CrossEntropyLoss()
+
+        
+        self.layers = hidden_layers
+        self.layer_1 = Conv_layer(1,3,1,0,conv_activation)
+        self.layer_2 = Pooling_layer(2,2)
+        self.layer_3 = FullyConnectedLayer(input_size, self.output_size, self.output_activation, self.optimizer)
+
+    def forward(self, input):
+
+        out1 = self.layer_1.forward(input)
+        out2 = self.layer_2.forward(out1)
+        out3 = self.layer_3.forward(out2)
+        return out3
+    
+
+    def backward(self, output, target):
+
+        loss, gradient = self.loss_object.forward(output, target)
+
+        grad_1 = self.layer_3.backward(gradient)
+        grad_2 = self.layer_2.backward(grad_1)
+        grad_3 = self.layer_1.backward(grad_2)
+
+        return loss
+
+
 
 test_image = img.imread('Lenna_gray.jpg')
 plt.imshow(test_image, cmap='gray')
@@ -153,3 +324,4 @@ out_pooling = out_pooling.T
 
 plt.imshow(out_pooling, cmap='gray')
 plt.show()
+
