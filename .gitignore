@@ -1,0 +1,11 @@
+*.png
+*.jpg
+.venv/
+.vscode/
+data/
+data_cat_dog/
+data_catdog/
+data_mn/
+__pycache__/
+*.py 
+!cnn.py
