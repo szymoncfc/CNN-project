@@ -2,6 +2,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.image as img
 
+
+# einsum  rollingwindow, asstrided, reshape
+
+np.einsum('c , h, w,')
+
+
 #dolnoprzpustowy
 filter1 = np.array([[[1, 1, 1],
                    [1, 4, 1],
