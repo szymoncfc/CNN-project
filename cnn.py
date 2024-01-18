@@ -5,7 +5,6 @@ import matplotlib.image as img
 
 # einsum  rollingwindow, asstrided, reshape
 
-np.einsum('c , h, w,')
 
 
 #dolnoprzpustowy
@@ -101,18 +100,32 @@ class Conv_layer():
         self.padding = padding
         self.activation = activation
 
-        #self.filters = np.random.randn(filter_num, filter_size, filter_size)
-        self.filters = np.array([[[1, 0, -1],[2, 0, -2],[1, 0, -1]]])
+        #self.filters = np.random.randn(filter_num, input_size, filter_size, filter_size)
+        self.filters = np.array([[[[1, 0, -1],[2, 0, -2],[1, 0, -1]]]])
+
+    def get_windows(self, input):
+
+        batch_size, channels, height, width = input.shape
+        batch_stride, channels_stride, r_stride, k_stride = input.strides
+
+        out_h = int(((height + (2 * self.padding) - self.filter_size)/self.stride))+1
+        out_w = int(((width + (2 * self.padding) - self.filter_size)/self.stride))+1
+
+        window_shape = (batch_size, channels, out_h, out_w, self.filter_size, self.filter_size)
+        strides_shape = (batch_stride, channels_stride, self.stride * r_stride, self.stride * k_stride, r_stride, k_stride)
+
+        return np.lib.stride_tricks.as_strided(input, window_shape, strides_shape)
+
 
     def forward(self, input):
         self.input = input
-        channels, height, width= input.shape
+        #channels, height, width= input.shape
 
 
         # wzor na output -> output shape = inputshape + 2*padding - filter_size/stride + 1 
         # numpy colvolve, rollingwindow
 
-
+        """
         out_hw = int(((height + (2 * self.padding) - self.filter_size)/self.stride))+1
 
         output = np.zeros((self.filter_num, out_hw, out_hw))
@@ -129,36 +142,45 @@ class Conv_layer():
 
                     update = input[:, height_start:height_end, width_start:width_end]
                     output[f, h, w] = np.sum(update * self.filters)
+        """
+        
 
 
-        output = self.activation.forward(output)
+        # fast version einsum
+
+        windows = self.get_windows(input)
+
+        output = np.einsum('bchwkt,fckt->bfhw', windows, self.filters)
+
+
+        #output = self.activation.forward(output)
         return output
     
 
     def backward(self, grad_out, lr):
         
-        channels, height, width= grad_out.shape    
+        batch_size, channels, height, width= grad_out.shape    
 
         grad_out = self.activation.backward(grad_out)
 
         grad_input = np.zeros(self.input.shape)
         grad_filter = np.zeros(self.filters.shape)
 
+        for i in range (batch_size):
+            for c in range(channels):
+                
+                for h in range(height):
+                    height_start = h * self.stride
+                    height_end = height_start + self.filter_size
 
-        for c in range(channels):
-            
-            for h in range(height):
-                height_start = h * self.stride
-                height_end = height_start + self.filter_size
+                    for w in range(width):               
+                        width_start = w * self.stride
+                        width_end = width_start + self.filter_size
 
-                for w in range(width):               
-                    width_start = w * self.stride
-                    width_end = width_start + self.filter_size
+                        update = self.input[:, height_start:height_end, width_start:width_end]
+                        grad_filter[c] += np.sum(grad_out[i, c, h, w]*update)
 
-                    update = self.input[:, height_start:height_end, width_start:width_end]
-                    grad_filter[c] += np.sum(grad_out[c, h, w]*update)
-
-                    grad_input[:, height_start:height_end, width_start:width_end] += grad_out[c, h, w] * self.filters[c]
+                        grad_input[:, :, height_start:height_end, width_start:width_end] += grad_out[i, c, h, w] * self.filters[c]
 
         self.filters -= lr * grad_filter
 
@@ -169,9 +191,26 @@ class Pooling_layer():
     def __init__(self, stride, size):
         self.size = size
         self.stride = stride
+        self.padding = 0
+
+    def get_windows(self, input):
+
+        batch_size, channels, height, width = input.shape
+        batch_stride, channels_stride, r_stride, k_stride = input.strides
+
+        out_h = int(((height + (2 * self.padding) - self.size)/self.stride))+1
+        out_w = int(((width + (2 * self.padding) - self.size)/self.stride))+1
+
+        window_shape = (batch_size, channels, out_h, out_w, self.size, self.size)
+        strides_shape = (batch_stride, channels_stride, self.stride * r_stride, self.stride * k_stride, r_stride, k_stride)
+
+        return np.lib.stride_tricks.as_strided(input, window_shape, strides_shape)
 
     def forward(self, input):
         self.input = input
+
+
+        """
         channels, height, width= input.shape
 
         # 2x2 output 2 razy mniejszy
@@ -195,28 +234,32 @@ class Pooling_layer():
                     output_pool[i, h, w] = np.max(update)
                     # avg
                     #output_pool[i, h, w] = np.mean(update)
+        """
+        windows_pool = self.get_windows(input)
+        out_pooling = windows_pool.max(axis=(4,5))
 
-        return output_pool
+        return out_pooling
     
     def backward(self, grad_out):
         
         grad_input = np.zeros(self.input.shape)
-        channels, height, width= grad_out.shape
+        batch_size, channels, height, width= grad_out.shape
 
-        for c in range(channels):
-                    
-            for h in range(height):
-                height_start = h * self.stride
-                height_end = height_start + self.filter_size
+        for i in range (batch_size):
+            for c in range(channels):
+                        
+                for h in range(height):
+                    height_start = h * self.stride
+                    height_end = height_start + self.size
 
-                for w in range(width):               
-                    width_start = w * self.stride
-                    width_end = width_start + self.filter_size
+                    for w in range(width):               
+                        width_start = w * self.stride
+                        width_end = width_start + self.size
 
-                    update = self.input[c, height_start:height_end, width_start:width_end]
+                        update = self.input[i, c, height_start:height_end, width_start:width_end]
 
-                    x = update == np.max(update)
-                    grad_input[c, height_start:height_end, width_start:width_end] = grad_out * x
+                        x = update == np.max(update)
+                        grad_input[i, c, height_start:height_end, width_start:width_end] = grad_out * x
 
         return grad_input
     
@@ -304,6 +347,7 @@ test_image = img.imread('Lenna_gray.jpg')
 plt.imshow(test_image, cmap='gray')
 plt.show()
 test_image = np.expand_dims(test_image, axis=2)
+test_image = np.expand_dims(test_image, axis=3)
 test_image = test_image.T
 
 print("Img shape: ", test_image.shape)
@@ -316,16 +360,22 @@ convolution = Conv_layer(1,3,1,0,Relu)
 out_image = convolution.forward(test_image)
 
 print("\nOut conv img shape: ", out_image.shape)
+out_image = np.squeeze(out_image, axis=0)
+print("\nOut conv img shape: ", out_image.shape)
 out_image = out_image.T
 
 plt.imshow(out_image, cmap='gray')
 plt.show()
 
 pooling = Pooling_layer(2,2)
+out_image = np.expand_dims(out_image, axis=3)
 out_image = out_image.T
+
 
 out_pooling = pooling.forward(out_image)
 print("\nOut pooling img shape: ", out_pooling.shape)
+out_pooling = np.squeeze(out_pooling, axis=0)
+print("\nOut conv img shape: ", out_pooling.shape)
 out_pooling = out_pooling.T
 
 plt.imshow(out_pooling, cmap='gray')

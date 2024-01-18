@@ -7,5 +7,6 @@ data_cat_dog/
 data_catdog/
 data_mn/
 __pycache__/
+data_cifar
 *.py 
 !cnn.py
