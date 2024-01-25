@@ -1,2 +1,2 @@
-# Projekt sieci konwolucyjnej w numpy
-Opis TBU ...
+# Projekt sieci konwolucyjnej
+Implementacja sieci konwolucyjnej w numpy

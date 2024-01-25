@@ -6,41 +6,12 @@ import matplotlib.image as img
 # einsum  rollingwindow, asstrided, reshape
 
 
-
-#dolnoprzpustowy
-filter1 = np.array([[[1, 1, 1],
-                   [1, 4, 1],
-                   [1, 1, 1]]])
-
-#gornoprzepustowy
-filter2 = np.array([[[-1, -1, -1],
-                   [-1,  9, -1],
-                   [-1, -1, -1]]])
-
-#sobel
-filter3 = np.array([[[1,   2,  1],
-                   [0,   0,  0],
-                   [-1, -2, -1]]])
-
-#negativ
-filter4 = np.array([[[-1, -1, -1],
-                    [-1, -1, -1],
-                    [-1, -1, -1]]])
-
-#sobel_l
-filter_5 = np.array([[
-                    [1, 0, -1],
-                    [2, 0, -2],
-                    [1, 0, -1]]])
-
-
-
 class Relu():
     def forward(self, input):
         return np.maximum(0,input)
 
-    def backward(self, input):
-        return (1 * (input > 0))
+    def backward(self, input, grad_output):
+        return (1 * (input > 0))*grad_output
 
 
 class Softmax():
@@ -50,10 +21,9 @@ class Softmax():
         return e_x / np.sum(e_x, axis=0)
 
     def backward(self, input, grad_output):
-        e_x = np.exp(input - np.max(input))
-        out = e_x / np.sum(e_x, axis=0)
+        out = input * (1 - input)
 
-        return (out*(1-out))*grad_output
+        return out * grad_output
 
 class SGD:
     def __init__(self, learning_rate, clip_range=10) -> None:
@@ -76,9 +46,10 @@ class CrossEntropyLoss:
     def forward(self, predictions: np.ndarray, target: np.ndarray) -> float:
 
         loss = -np.sum(target * np.log(predictions+self.stability))
-        
+ 
         grad = -target/(predictions+self.stability)
-
+        loss = np.mean(loss)
+        grad = np.mean(grad)
 
         return loss, grad 
     
@@ -93,19 +64,23 @@ class Conv_layer():
     umozliwia otrzymanie rozmiaru wyjścia takiego samego jak rozmiar wejścia jesli krok=1
     
     """
-    def __init__(self, filter_num, filter_size, stride, padding, activation) -> None:
+    def __init__(self, input_size, filter_num, filter_size, stride, padding, activation) -> None:
         self.filter_num = filter_num
         self.filter_size = filter_size
         self.stride = stride
-        self.padding = padding
+        self.padding = padding  
         self.activation = activation
-
-        #self.filters = np.random.randn(filter_num, input_size, filter_size, filter_size)
-        self.filters = np.array([[[[1, 0, -1],[2, 0, -2],[1, 0, -1]]]])
+        self.input_size = input_size
+        self.filters = np.random.randn(self.filter_num, self.input_size, self.filter_size, self.filter_size)
+        #self.filters = np.array([[[[1, 0, -1],[2, 0, -2],[1, 0, -1]]]])
+        self.bias = np.zeros(self.out_channels)
 
     def get_windows(self, input):
 
         batch_size, channels, height, width = input.shape
+
+        if self.padding != 0:
+            input = np.pad(input, pad_width=((0,), (0,), (self.padding,), (self.padding,)), mode='constant', constant_values=(0.,))
         batch_stride, channels_stride, r_stride, k_stride = input.strides
 
         out_h = int(((height + (2 * self.padding) - self.filter_size)/self.stride))+1
@@ -124,7 +99,7 @@ class Conv_layer():
 
         # wzor na output -> output shape = inputshape + 2*padding - filter_size/stride + 1 
         # numpy colvolve, rollingwindow
-
+        # slow ver
         """
         out_hw = int(((height + (2 * self.padding) - self.filter_size)/self.stride))+1
 
@@ -143,25 +118,27 @@ class Conv_layer():
                     update = input[:, height_start:height_end, width_start:width_end]
                     output[f, h, w] = np.sum(update * self.filters)
         """
-        
-
 
         # fast version einsum
 
         windows = self.get_windows(input)
+        self.windows = windows
 
         output = np.einsum('bchwkt,fckt->bfhw', windows, self.filters)
+        output += self.bias[None, :, None, None]
 
-
-        #output = self.activation.forward(output)
+        output = self.activation.forward(output)
+        self.output = output
         return output
     
 
     def backward(self, grad_out, lr):
         
+        # slow ver
+        """
         batch_size, channels, height, width= grad_out.shape    
 
-        grad_out = self.activation.backward(grad_out)
+        grad_out = self.activation.backward(self.output, grad_out)
 
         grad_input = np.zeros(self.input.shape)
         grad_filter = np.zeros(self.filters.shape)
@@ -181,8 +158,19 @@ class Conv_layer():
                         grad_filter[c] += np.sum(grad_out[i, c, h, w]*update)
 
                         grad_input[:, :, height_start:height_end, width_start:width_end] += grad_out[i, c, h, w] * self.filters[c]
+        """
+        # fast ver
 
-        self.filters -= lr * grad_filter
+        grad_windows = self.get_windows(grad_out)
+        rot_filter = np.rot90(self.filters, 2, axes=(2, 3))
+
+        grad_filters = np.einsum('bchwkt,bfhw->fckt', self.windows, grad_out)
+        grad_input = dx = np.einsum('bfhwkt,fckt->bchw', grad_windows, rot_filter)
+        grad_bias = db = np.sum(grad_out, axis=(0, 2, 3))
+
+
+        self.filters -= lr * grad_filters
+        self.bias -= lr * grad_bias
 
         return grad_input
     
@@ -209,7 +197,7 @@ class Pooling_layer():
     def forward(self, input):
         self.input = input
 
-
+        # slow ver
         """
         channels, height, width= input.shape
 
@@ -235,13 +223,17 @@ class Pooling_layer():
                     # avg
                     #output_pool[i, h, w] = np.mean(update)
         """
+        # fast ver
         windows_pool = self.get_windows(input)
         out_pooling = windows_pool.max(axis=(4,5))
 
         return out_pooling
     
+
     def backward(self, grad_out):
         
+        # do dodania fast unpulling
+
         grad_input = np.zeros(self.input.shape)
         batch_size, channels, height, width= grad_out.shape
 
@@ -275,10 +267,9 @@ class FullyConnectedLayer:
         self.weights = np.random.randn(input_size, output_size)
         self.bias = 0
 
-    def forward(self, input):
-        input = input.flatten() 
+    def forward(self, input): 
         self.input = input
-        #print(input.shape)
+
         intermediate = np.dot(input, self.weights) + self.bias
         #intermediate = (self.weights.T * input) + self.bias
         self.intermediate = intermediate
@@ -302,82 +293,66 @@ class FullyConnectedLayer:
 
 class Full_Net:
     def __init__(
-        self, input_size, output_size, optimizer, 
-        hidden_layers=[128], 
+        self, input_size, output_size, optimizer, lr, 
+        hidden_layers=[128,64], 
         output_activation=Softmax, 
-        conv_activation=Relu
+        activation=Relu,
     ) -> None:
 
         self.input_size = input_size
         self.output_size = output_size
         self.optimizer = optimizer
-
-        self.conv_activation = conv_activation
+        self.learnig_rate = lr
+        self.activation = activation
         self.output_activation = output_activation
 
         self.loss_object = CrossEntropyLoss()
 
         
         self.layers = hidden_layers
-        self.layer_1 = Conv_layer(1,3,1,0,conv_activation)
-        self.layer_2 = Pooling_layer(2,2)
-        self.layer_3 = FullyConnectedLayer(input_size, self.output_size, self.output_activation, self.optimizer)
+        # conv_layer (input_size, filter_num, filter_size, stride, padding, activation)
+        self.conv1 = Conv_layer(3, 64, 3, 1, 1, self.activation)
+        self.conv2 = Conv_layer(64, 128, 3, 1, 1, self.activation)
+        self.pooling1 = Pooling_layer(2,2)
+        self.pooling2 = Pooling_layer(2,2)
+        self.fclayer_1 = FullyConnectedLayer(input_size, self.output_size, self.activation, self.optimizer)
+        self.fclayer_2 = FullyConnectedLayer(self.layers[0], self.layers[1], self.activation, self.optimizer)
+        self.fclayer_3 = FullyConnectedLayer(self.layers[1], self.output_size, self.output_activation, self.optimizer)
+
 
     def forward(self, input):
 
-        out1 = self.layer_1.forward(input)
-        out2 = self.layer_2.forward(out1)
-        out3 = self.layer_3.forward(out2)
-        return out3
+        conv1 = self.conv1.forward(input)       # (batch_size, 64, 32, 32)
+        pool1 = self.pooling1.forward(conv1)    # (batch_size, 64, 16, 16)   
+
+        conv2 = self.conv1.forward(pool1)       # (batch_size, 128, 16, 16)
+        pool2 = self.pooling2.forward(conv2)    # (batch_size, 128, 8, 8)
+
+        self.shape_after_pool = pool2.shape
+        flatten = pool2.reshape(self.pool2_shape[0], -1)    # (batch_size, 128*8*8)
+
+        fclayer1 = self.fclayer_1.forward(flatten)      # (batch_size, 128)
+        fclayer2 = self.fclayer_2.forward(fclayer1)     # (batch_size, 64)
+        fclayer3 = self.fclayer_3.forward(fclayer2)     # (batch_size, 10)
+
+        return fclayer3
     
 
     def backward(self, output, target):
 
         loss, gradient = self.loss_object.forward(output, target)
 
-        grad_1 = self.layer_3.backward(gradient)
-        grad_2 = self.layer_2.backward(grad_1)
-        grad_3 = self.layer_1.backward(grad_2)
+        grad = self.fclayer_3.backward(gradient)
+        grad = self.fclayer_2.backward(grad)
+        grad = self.fclayer_1.backward(grad)
+
+        grad = grad.reshape(self.shape_after_pool)
+        grad = self.pooling2.backward(grad)
+        grad = self.conv2.backward(grad, self.learnig_rate)
+        grad = self.pooling1.backward(grad)
+        grad = self.conv1.backward(grad, self.learnig_rate)
 
         return loss
 
 
-
-test_image = img.imread('Lenna_gray.jpg')
-plt.imshow(test_image, cmap='gray')
-plt.show()
-test_image = np.expand_dims(test_image, axis=2)
-test_image = np.expand_dims(test_image, axis=3)
-test_image = test_image.T
-
-print("Img shape: ", test_image.shape)
-print("Filter shape: ", filter1.shape)
-
-
-convolution = Conv_layer(1,3,1,0,Relu)
-
-
-out_image = convolution.forward(test_image)
-
-print("\nOut conv img shape: ", out_image.shape)
-out_image = np.squeeze(out_image, axis=0)
-print("\nOut conv img shape: ", out_image.shape)
-out_image = out_image.T
-
-plt.imshow(out_image, cmap='gray')
-plt.show()
-
-pooling = Pooling_layer(2,2)
-out_image = np.expand_dims(out_image, axis=3)
-out_image = out_image.T
-
-
-out_pooling = pooling.forward(out_image)
-print("\nOut pooling img shape: ", out_pooling.shape)
-out_pooling = np.squeeze(out_pooling, axis=0)
-print("\nOut conv img shape: ", out_pooling.shape)
-out_pooling = out_pooling.T
-
-plt.imshow(out_pooling, cmap='gray')
-plt.show()
 
